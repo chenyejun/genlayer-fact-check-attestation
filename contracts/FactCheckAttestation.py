@@ -15,9 +15,15 @@ the check.
   record SUPERSEDED and links it to the new one.
 - Verification runs in two sequential consensus rounds (see
   _verify_with_consensus): the evidence is agreed first, the verdict
-  second. The quotes are checked with gl.eq_principle.strict_eq, because
-  a quote is deterministic text copied from a page; the verdict is a
-  judgement call and is compared with plain equality instead.
+  second. The evidence round compares quotes tolerantly, per source:
+  quotes are normalized (whitespace, casing, surrounding punctuation)
+  and the two sides must share at least one normalized quote from
+  every source either side quotes from. Byte-identical agreement was
+  tried first and failed on StudioNet: three verify_claim attempts in
+  a row ended in "Majority disagreement, rotating the leader" because
+  validators extract different spans and trimmings of the same
+  passages. The verdict is a judgement call and is compared with plain
+  equality instead.
 - A source that fails to load is recorded, not hidden. If every source
   fails, verification fails with a classified error ([EXTERNAL] for 4xx,
   [TRANSIENT] otherwise). If at least one loads, the verdict is reached
@@ -234,6 +240,56 @@ def _quoted_sources(canon: str) -> list:
     return [entry["source"] for entry in _quotes_from_canon(canon)]
 
 
+# Punctuation stripped from the ends of a quote when two extractions are
+# compared. A quote is copied text, so a leading or trailing comma,
+# period, or quote mark is a boundary choice by the model, not different
+# evidence.
+_COMPARE_STRIP_CHARS = " \t\n.,;:!?\"'()[]{}«»“”‘’—–-…"
+
+
+def _normalize_quote_for_compare(quote: str) -> str:
+    """Normalize one quote for agreement comparison: collapse whitespace,
+    lowercase, strip surrounding punctuation. Two extractions of the same
+    passage that differ only in casing, spacing, or where the model cut
+    the ends agree after this; extractions of different passages do not."""
+    return " ".join(str(quote).split()).lower().strip(_COMPARE_STRIP_CHARS)
+
+
+def _quotes_agree(leader_canon: str, validator_canon: str) -> bool:
+    """Tolerant agreement on two canonical quote sets, per source.
+
+    For every source either side quotes from, the two sides must share at
+    least one normalized quote from that source. This is deliberately
+    per source rather than a similarity score over the whole set: the
+    contract's rule is that every loaded source must back the verdict
+    with a quote, so agreement has to hold source by source — a score
+    over the pooled set could pass while one source contributes no
+    shared evidence at all. It is also tolerant where it should be: a
+    side that lists an extra supporting sentence still shares at least
+    one quote per source, while a side that quotes a different passage
+    from a source, or nothing from it, fails that source and disagrees.
+    Two empty sets agree, matching the old byte-equality behaviour for
+    the no-quotes case."""
+    leader_by_source = {}
+    validator_by_source = {}
+    for canon, by_source in ((leader_canon, leader_by_source), (validator_canon, validator_by_source)):
+        for entry in _quotes_from_canon(canon):
+            normalized = _normalize_quote_for_compare(entry["quote"])
+            if normalized == "":
+                continue
+            source = entry["source"]
+            if source not in by_source:
+                by_source[source] = set()
+            by_source[source].add(normalized)
+    sources = set(leader_by_source) | set(validator_by_source)
+    for source in sources:
+        leader_quotes = leader_by_source.get(source, set())
+        validator_quotes = validator_by_source.get(source, set())
+        if len(leader_quotes & validator_quotes) == 0:
+            return False
+    return True
+
+
 def _one_of(value, allowed: tuple, field: str) -> str:
     """Coerce a model field to one of the allowed values, or fail as an
     LLM error. A model that cannot stay inside the enum is not a model
@@ -414,34 +470,52 @@ class FactCheckAttestation(gl.Contract):
         self.attestation_counter = u256(0)
 
     # -- consensus ------------------------------------------------------
-    # Two sequential rounds, because the two mechanisms cannot nest: the
-    # linter (and the VM) forbids calling an equivalence principle from
-    # inside a run_nondet block, and a nondet call is only valid inside
-    # one of the two. Each round runs the same _judge code, with the
-    # enforcement that fits what it is agreeing on:
-    # - Round 1 agrees the EVIDENCE. The canonical quote set is checked
-    #   with gl.eq_principle.strict_eq: a quote is deterministic text
-    #   copied from a page, so two honest runs that read the same pages
-    #   must produce the same set, byte for byte.
+    # Two sequential rounds, because the two mechanisms cannot nest: a
+    # nondet call is only valid inside one of the two. Each round runs
+    # the same _judge code, with the enforcement that fits what it is
+    # agreeing on:
+    # - Round 1 agrees the EVIDENCE with gl.vm.run_nondet_unsafe.
+    #   The leader and each validator re-run _judge and their quote
+    #   sets must agree tolerantly, per source, under _quotes_agree:
+    #   normalized quotes, at least one shared quote from every source
+    #   either side quotes from. Byte-identical agreement was tried
+    #   first (gl.eq_principle.strict_eq on the canonical quote set)
+    #   and failed on StudioNet three times in a row — validators
+    #   extract different spans and trimmings of the same passages, so
+    #   a strict majority was never reached. No strict_eq is used on
+    #   any LLM output anywhere in this contract.
     # - Round 2 agrees the VERDICT with gl.vm.run_nondet_unsafe. The
-    #   leader and each validator re-run _judge and the verdict (and the
-    #   confidence band) must match by plain equality — the verdict is a
-    #   judgement call, so it is never put through strict_eq. The
-    #   validator also requires both sides' quotes to equal the round-1
-    #   agreed set, so a stored attestation never pairs a verdict with
-    #   quotes from a run that extracted something else; if the model
-    #   contradicts itself across rounds, consensus fails and nothing
-    #   is stored.
+    #   leader and each validator re-run _judge and the verdict (and
+    #   the confidence band) must match by plain equality — the verdict
+    #   is a judgement call, so it is never put through strict_eq. The
+    #   validator also requires both sides' fresh quotes to agree
+    #   tolerantly with the round-1 agreed set, so a stored attestation
+    #   never pairs a verdict with quotes from a run that extracted
+    #   something else; if the model contradicts itself across rounds,
+    #   consensus fails and nothing is stored. The gate is tolerant for
+    #   the same reason round 1 is: a byte-equality check here would
+    #   re-impose the exact brittleness round 1 removed.
     def _verify_with_consensus(self, claim_text: str, context: str, sources: list) -> dict:
-        def extract_quotes() -> str:
+        def quote_leader_fn() -> str:
             return _judge(claim_text, context, sources)["quotes"]
 
-        agreed_quotes = gl.eq_principle.strict_eq(extract_quotes)
+        def quote_validator_fn(leaders_res) -> bool:
+            if not isinstance(leaders_res, gl.vm.Return):
+                return _leader_error_is_agreeable(
+                    leaders_res, lambda: _judge(claim_text, context, sources)["quotes"]
+                )
+            try:
+                mine = _judge(claim_text, context, sources)["quotes"]
+            except Exception:
+                return False
+            return _quotes_agree(leaders_res.calldata, mine)
 
-        def leader_fn() -> dict:
+        agreed_quotes = gl.vm.run_nondet_unsafe(quote_leader_fn, quote_validator_fn)
+
+        def verdict_leader_fn() -> dict:
             return _judge(claim_text, context, sources)
 
-        def validator_fn(leaders_res) -> bool:
+        def verdict_validator_fn(leaders_res) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
                 return _leader_error_is_agreeable(
                     leaders_res, lambda: _judge(claim_text, context, sources)
@@ -455,13 +529,15 @@ class FactCheckAttestation(gl.Contract):
                 return False
             if mine["confidence"] != leader["confidence"]:
                 return False
-            if mine["quotes"] != agreed_quotes or leader["quotes"] != agreed_quotes:
+            if not _quotes_agree(mine["quotes"], agreed_quotes):
+                return False
+            if not _quotes_agree(leader["quotes"], agreed_quotes):
                 return False
             return True
 
-        result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-        # The stored quotes are always the strict_eq-agreed set from
-        # round 1, never one side's fresh extraction.
+        result = gl.vm.run_nondet_unsafe(verdict_leader_fn, verdict_validator_fn)
+        # The stored quotes are always the leader's round-1 set, agreed
+        # tolerantly, never one side's fresh extraction.
         result["quotes"] = agreed_quotes
         return result
 
