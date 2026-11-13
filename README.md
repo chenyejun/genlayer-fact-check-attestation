@@ -13,10 +13,11 @@ party decided the verdict, a submitter could pick friendly sources, quote
 selectively, or run the check until the model gave the answer they
 wanted. Here the verdict is produced by a leader and re-produced
 independently by every validator, and it is only written to state when
-they agree. The evidence is held to an even stricter bar than the
-verdict (see "How the equivalence check works" below), and every
-attestation stores the quotes it rests on, so anyone can audit the
-result after the fact instead of trusting the submitter.
+they agree. The evidence is agreed per source, with a tolerance rule
+built for how models actually extract quotes (see "How the equivalence
+check works" below), and every attestation stores the quotes it rests
+on, so anyone can audit the result after the fact instead of trusting
+the submitter.
 
 ## What it does
 
@@ -75,26 +76,56 @@ sequential, not nested, because the VM and the linter forbid calling an
 equivalence principle from inside a `run_nondet` block, and a nondet
 call is only valid inside one of the two.
 
-**Round 1 — the evidence.** The canonical quote set is checked with
-`gl.eq_principle.strict_eq`. A quote is deterministic text copied from a
-page, not a judgement call: two honest runs that read the same pages
-must produce the same set, byte for byte. `strict_eq` compares the
-canonical calldata encoding of the return value, so even a one-character
-difference fails consensus. Quotes citing a URL that was not one of the
-loaded sources are dropped before canonicalization — that is either a
-hallucination or an injected URL, and neither may be stored.
+**Round 1 — the evidence.** `gl.vm.run_nondet_unsafe` re-runs the
+judge on both sides and compares the quote sets tolerantly, per
+source, with `_quotes_agree`: each quote is normalized (whitespace
+collapsed, lowercased, surrounding punctuation stripped), and for
+every source either side quotes from, the two sides must share at
+least one normalized quote from that source. The stored quotes are
+the leader's agreed set.
+
+The rule is per source rather than a similarity score over the whole
+set, for two reasons. First, the contract's own rule is that every
+loaded source must back the verdict with a quote, so agreement has
+to hold source by source: a pooled score such as Jaccard ≥ 0.5 can
+pass while one source contributes no shared evidence at all (leader
+{A1, A2, B1} against validator {A1, A2} scores 2/3, with nothing
+shared for B). Second, it tolerates the variance models actually
+show: a validator that lists an extra supporting sentence still
+shares at least one quote per source, while a validator that quotes
+a different passage from a source, or nothing from it, fails that
+source and disagrees. What the rule does not forgive is quoting
+different passages — normalization fixes casing, spacing, and where
+the model cut the ends, not which passage it picked.
+
+This replaced byte-identical agreement. The first version checked the
+canonical quote set with `gl.eq_principle.strict_eq`, on the
+reasoning that a quote is deterministic text copied from a page.
+On StudioNet that never reached a majority: `verify_claim` failed
+consensus three times in a row on the deployed contract
+(`0x9543D6096e36c32FB46DC83127Ae3ce827dA207D`), each attempt ending
+after three "Majority disagreement, rotating the leader" rounds with
+UNDETERMINED, and no attestation was ever created. Validators
+extract different spans and trimmings of the same passages, so a
+strict byte-equality majority is not a bar honest validators can
+meet. No `strict_eq` is used on any LLM output anywhere in the
+contract now.
 
 **Round 2 — the verdict.** `gl.vm.run_nondet_unsafe(leader_fn,
 validator_fn)` re-runs the judge. The validator requires the verdict
 and the confidence band to match by plain `==`, and it requires both
-sides' quotes to equal the round-1 agreed set. The verdict is
-deliberately never put through `strict_eq`: it is a judgement call, and
-a validator that reaches the same verdict from the same quotes has
+sides' fresh quotes to agree tolerantly with the round-1 agreed set
+under the same `_quotes_agree` rule. The verdict is deliberately
+never put through `strict_eq`: it is a judgement call, and a
+validator that reaches the same verdict from the same quotes has
 agreed. The extra quote comparison in round 2 is a coherence gate: a
 stored attestation never pairs a verdict with quotes from a run that
 extracted something else. If the model contradicts itself across
 rounds, consensus fails and nothing is stored — a safe failure, retried
-later.
+later. The gate is tolerant for the same reason round 1 is: a
+byte-equality check here would re-impose the exact brittleness
+round 1 removed, since each side's round-2 extraction is a fresh
+model call.
 
 **The per-source quote rule.** After canonicalization, every source
 that loaded must contribute at least one quote. If any does not, the
@@ -231,7 +262,12 @@ Direct tests (mocked web + LLM, no network) live in
 `genlayer-test` pattern (`direct_vm` / `direct_deploy` fixtures). They
 cover submission and duplicate rejection, validation errors, a
 successful verification, validator agreement and disagreement (verdict
-and quotes, via mock swapping between leader and replay), the
+and quotes, via mock swapping between leader and replay — the replay
+uses `run_validator(index=0)` for the round-1 evidence validator and
+`run_validator()` for the round-2 verdict validator), the tolerance
+rule (quotes differing only in casing, spacing, or trailing
+punctuation agree; an extra quote still agrees; quotes from different
+passages with no shared quote disagree), the
 per-source quote rule, one-source-down and all-sources-down handling,
 challenge supersede and same-verdict rejection, and all views.
 
@@ -243,15 +279,15 @@ challenge supersede and same-verdict rejection, and all views.
 ## Limitations
 
 - **Quotes are not re-verified against page text.** The contract
-  checks that quotes cite a loaded source and that all validators
-  extracted the same set, but it cannot prove a quote is verbatim
-  without re-reading the page deterministically. A model that invents
-  the same plausible quote on every run would pass. The stored quotes
-  are on chain, so a reader can always check them against the source.
+  checks that quotes cite a loaded source and that validators found
+  the same evidence from each source, but it cannot prove a quote is
+  verbatim without re-reading the page deterministically. A model
+  that invents the same plausible quote on every run would pass. The
+  stored quotes are on chain, so a reader can always check them
+  against the source.
 - **Two rounds cost two model calls per side.** Round 1 and round 2
   each fetch the pages and prompt the model. The cost is the price of
-  keeping `strict_eq` off the verdict while still enforcing it on the
-  quotes.
+  agreeing the evidence and the verdict in separate rounds.
 - **`run_nondet_unsafe` error semantics.** A validator-side failure
   (for example, a source that is down for the validators but up for the
   leader) surfaces as a disagreement, not as a classified transient

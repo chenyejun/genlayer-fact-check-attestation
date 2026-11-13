@@ -13,7 +13,7 @@
   (`1zr6nqk...`); the contract targets the boilerplate's runner, and
   moving to a newer runner requires the renamed APIs, not just the hash —
   do not change the hash alone.
-- Direct tests: 21 passed
+- Direct tests: 24 passed
   (`./.venv/bin/python -m pytest tests/direct -q`).
 
 ## Constructor
