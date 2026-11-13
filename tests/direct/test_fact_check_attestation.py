@@ -218,8 +218,11 @@ def test_validator_disagrees_on_quotes(direct_vm, direct_deploy):
     _submit(direct_vm, contract)
     _verify_supported(direct_vm, contract)
 
-    # Same verdict, but the validator extracts a different quote: the
-    # round-1 agreed quote set no longer matches, so it disagrees.
+    # Same verdict, but the validator extracts a different span for
+    # source A: after normalization the two sides share no quote from
+    # that source, so the tolerant per-source check disagrees in both
+    # rounds. (Whitespace or casing alone would agree — see the
+    # tolerance tests below — but a different passage does not.)
     direct_vm.clear_mocks()
     _mock_pages(vm=direct_vm, pages={URL_A: PAGE_A, URL_B: PAGE_B})
     _mock_llm(
@@ -234,6 +237,86 @@ def test_validator_disagrees_on_quotes(direct_vm, direct_deploy):
         },
     )
 
+    assert direct_vm.run_validator(index=0) is False
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_agrees_when_quotes_differ_only_in_case_and_whitespace(direct_vm, direct_deploy):
+    contract = direct_deploy("contracts/FactCheckAttestation.py")
+    _submit(direct_vm, contract)
+    _verify_supported(direct_vm, contract)
+
+    # The validator extracts the same passages, but with different
+    # casing, extra spaces, and different trailing punctuation. After
+    # normalization the quotes are the same, so both rounds agree.
+    direct_vm.clear_mocks()
+    _mock_pages(vm=direct_vm, pages={URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(
+        direct_vm,
+        {
+            "verdict": "SUPPORTED",
+            "confidence": "high",
+            "quotes": [
+                {"source": URL_A, "quote": "  RIVERTON   opened a new public library in 2025 "},
+                {"source": URL_B, "quote": "the new riverton public library opened its doors in 2025."},
+            ],
+        },
+    )
+
+    assert direct_vm.run_validator(index=0) is True
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_agrees_when_it_extracts_an_extra_quote(direct_vm, direct_deploy):
+    contract = direct_deploy("contracts/FactCheckAttestation.py")
+    _submit(direct_vm, contract)
+    _verify_supported(direct_vm, contract)
+
+    # The validator lists one extra supporting sentence from source A.
+    # The per-source rule only needs one shared quote per source, so
+    # the extra quote does not break agreement in either round.
+    direct_vm.clear_mocks()
+    _mock_pages(vm=direct_vm, pages={URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(
+        direct_vm,
+        {
+            "verdict": "SUPPORTED",
+            "confidence": "high",
+            "quotes": [
+                {"source": URL_A, "quote": "Riverton opened a new public library in 2025."},
+                {"source": URL_A, "quote": "the mayor announced on Tuesday."},
+                {"source": URL_B, "quote": "The new Riverton public library opened its doors in 2025."},
+            ],
+        },
+    )
+
+    assert direct_vm.run_validator(index=0) is True
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_disagrees_when_quotes_have_no_overlap(direct_vm, direct_deploy):
+    contract = direct_deploy("contracts/FactCheckAttestation.py")
+    _submit(direct_vm, contract)
+    _verify_supported(direct_vm, contract)
+
+    # Same verdict and confidence, but the validator quotes different
+    # passages from the same sources: no normalized quote is shared for
+    # either source, so both rounds disagree.
+    direct_vm.clear_mocks()
+    _mock_pages(vm=direct_vm, pages={URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(
+        direct_vm,
+        {
+            "verdict": "SUPPORTED",
+            "confidence": "high",
+            "quotes": [
+                {"source": URL_A, "quote": "the mayor announced on Tuesday."},
+                {"source": URL_B, "quote": "after two years of construction."},
+            ],
+        },
+    )
+
+    assert direct_vm.run_validator(index=0) is False
     assert direct_vm.run_validator() is False
 
 
