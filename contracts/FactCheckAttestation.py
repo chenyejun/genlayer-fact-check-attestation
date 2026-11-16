@@ -10,9 +10,15 @@ the check.
 
 - A claim is submitted once. The same normalized claim text cannot be
   submitted twice; new evidence against an existing attestation goes
-  through challenge_attestation, which supersedes the old record.
-  Attestations are never deleted: a successful challenge marks the old
-  record SUPERSEDED and links it to the new one.
+  through challenge_attestation. Only an opposing substantive verdict
+  (SUPPORTED against REFUTED, or the other way round) supersedes the
+  old record — or a substantive verdict that replaces an
+  INSUFFICIENT_EVIDENCE record. A challenge that reaches
+  INSUFFICIENT_EVIDENCE never supersedes: not being able to tell is
+  not counter-evidence, and unrelated sources must not be able to
+  downgrade a valid current attestation. Attestations are never
+  deleted: a successful challenge marks the old record SUPERSEDED and
+  links it to the new one.
 - Verification runs in two sequential consensus rounds (see
   _verify_with_consensus): the evidence is agreed first, the verdict
   second. The evidence round compares quotes tolerantly, per source:
@@ -452,9 +458,13 @@ class FactCheckAttestation(gl.Contract):
     """Registry of fact-check attestations.
 
     Claims are submitted once, verified once by validator consensus, and
-    then challenged only with new counter-evidence. Attestations are never
-    deleted: a successful challenge supersedes the old record and links
-    the two, so the full history stays readable on chain.
+    then challenged only with new counter-evidence. A challenge only
+    supersedes the old record when it reaches the opposing substantive
+    verdict, or a substantive verdict replacing an INSUFFICIENT_EVIDENCE
+    record; a challenge that reaches INSUFFICIENT_EVIDENCE is rejected
+    and the old record stands. Attestations are never deleted: a
+    successful challenge supersedes the old record and links the two, so
+    the full history stays readable on chain.
     """
 
     claims: TreeMap[u256, Claim]
@@ -624,9 +634,13 @@ class FactCheckAttestation(gl.Contract):
     def challenge_attestation(self, attestation_id: u256, sources: str, context: str) -> dict:
         """Challenge a current attestation with new counter-evidence
         (2-3 source URLs, comma-separated). The claim is re-checked
-        against the new sources; if the verdict differs, the new
-        attestation supersedes the old one. A challenge that reaches
-        the same verdict is rejected and the old record stands."""
+        against the new sources; the new attestation supersedes the old
+        one only when the verdict is the opposing substantive one
+        (SUPPORTED against REFUTED, or the other way round), or a
+        substantive verdict replacing an INSUFFICIENT_EVIDENCE record.
+        A challenge that reaches the same verdict, or
+        INSUFFICIENT_EVIDENCE, is rejected and the old record stands:
+        not being able to tell is not counter-evidence."""
         if attestation_id not in self.attestations:
             _fail(ERR_EXPECTED, "unknown attestation " + str(attestation_id))
         old = self.attestations[attestation_id]
@@ -647,6 +661,11 @@ class FactCheckAttestation(gl.Contract):
             clean_context = _clean_text(context, "context", MAX_CONTEXT_CHARS)
         claim_mem = gl.storage.copy_to_memory(claim)
         result = self._verify_with_consensus(claim_mem.claim_text, clean_context, parsed)
+        if result["verdict"] == VERDICT_INSUFFICIENT:
+            _fail(
+                ERR_EXPECTED,
+                "challenge reached INSUFFICIENT_EVIDENCE; attestation stands",
+            )
         if result["verdict"] == old.verdict:
             _fail(
                 ERR_EXPECTED,
