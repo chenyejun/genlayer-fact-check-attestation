@@ -30,9 +30,12 @@ the submitter.
   the verbatim quotes, and how many sources loaded.
 - `challenge_attestation` — anyone can challenge a current attestation
   with new counter-evidence (2–3 source URLs). The claim is re-checked
-  against the new sources; if the verdict differs, the new attestation
-  supersedes the old one. A challenge that reaches the same verdict is
-  rejected and the old record stands.
+  against the new sources; only an opposing substantive verdict
+  (`SUPPORTED` against `REFUTED`, or the other way round) supersedes
+  the old one — or a substantive verdict replacing an
+  `INSUFFICIENT_EVIDENCE` record. A challenge that reaches the same
+  verdict, or `INSUFFICIENT_EVIDENCE`, is rejected and the old record
+  stands.
 - Views: `get_claim`, `get_attestation`, `get_current_attestation`,
   `get_claim_id`, `list_claims`, `list_attestations`, `stats`.
 
@@ -152,7 +155,7 @@ in-memory values. The leader and validator functions never reference
 
 | Prefix | Meaning | Examples | Caller should |
 | --- | --- | --- | --- |
-| `[EXPECTED]` | Bad input or invalid state | Duplicate claim, fewer than 2 or more than 3 sources, non-HTTPS URL, URL with credentials/port/IP host, verifying an already-attested claim, challenging a non-current attestation, challenge reaching the same verdict | Fix the input; no retry |
+| `[EXPECTED]` | Bad input or invalid state | Duplicate claim, fewer than 2 or more than 3 sources, non-HTTPS URL, URL with credentials/port/IP host, verifying an already-attested claim, challenging a non-current attestation, challenge reaching the same verdict, challenge reaching `INSUFFICIENT_EVIDENCE` | Fix the input; no retry |
 | `[EXTERNAL]` | The outside world is at fault, deterministically | Every source failed with a 4xx (page gone, moved, or access denied) | Replace the dead sources and resubmit; no point retrying the same URLs |
 | `[TRANSIENT]` | The outside world failed, possibly temporarily | Every source failed with a 5xx, timeout, or connection error | Retry later; nothing was written |
 | `[LLM_ERROR]` | The model answer was unusable | Non-JSON answer, verdict or confidence outside the enum | Retry; the leader rotates, so a persistent failure means the prompt or the pages are the problem |
@@ -269,7 +272,9 @@ rule (quotes differing only in casing, spacing, or trailing
 punctuation agree; an extra quote still agrees; quotes from different
 passages with no shared quote disagree), the
 per-source quote rule, one-source-down and all-sources-down handling,
-challenge supersede and same-verdict rejection, and all views.
+challenge supersede, `INSUFFICIENT_EVIDENCE` challenge rejection,
+upgrade from `INSUFFICIENT_EVIDENCE`, the reverse flip, and same-verdict
+rejection, and all views.
 
 ```bash
 ./.venv/bin/python -m pytest tests/direct -q

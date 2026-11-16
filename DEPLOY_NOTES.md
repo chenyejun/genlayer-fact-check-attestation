@@ -94,30 +94,57 @@ Args: `claim_id: 1`.
 
 Expected: reverts with `[EXPECTED]` (`claim 1 is already ATTESTED`).
 
-### 5. `challenge_attestation` — supersede
+### 5. `challenge_attestation` — what can (and cannot) supersede
 
-A supersede needs a verdict that actually flips. The cleanest
-deterministic flip: challenge a `REFUTED` attestation with sources that
-do not address the claim at all. The model cannot quote them for or
-against the claim, so the per-source quote rule records
-`INSUFFICIENT_EVIDENCE`, which differs from `REFUTED` and supersedes it.
+Only an opposing substantive verdict replaces a current attestation:
+`SUPPORTED` against `REFUTED`, or the other way round — or a
+substantive verdict replacing an `INSUFFICIENT_EVIDENCE` record. A
+challenge that reaches `INSUFFICIENT_EVIDENCE` is rejected: not being
+able to tell is not counter-evidence, and unrelated sources must not
+downgrade a valid current attestation.
 
-1. `submit_claim("The Eiffel Tower is located in London.", <same two sources as step 1>, "")` → `{claim_id: 2, status: "SUBMITTED"}`.
+(a) An `INSUFFICIENT_EVIDENCE` challenge is rejected. Challenge the
+Paris `SUPPORTED` attestation with sources that do not address the
+claim:
+
+`challenge_attestation(1, "https://en.wikipedia.org/wiki/London_Eye,https://en.wikipedia.org/wiki/Big_Ben", "")`
+
+Expected: reverts with `[EXPECTED]` (`challenge reached
+INSUFFICIENT_EVIDENCE; attestation stands`). Nothing is written;
+`get_attestation(1)` still shows `status: "CURRENT"` and
+`superseded_by: 0`. If it instead reverts with `[TRANSIENT]` or
+`[LLM_ERROR]`, retry — a source was briefly unreachable or the model
+answer was malformed. (If it succeeds with a substantive verdict, the
+model read the new sources as actually deciding the claim; re-check
+the sources before trusting that result.)
+
+(b) Upgrade from `INSUFFICIENT_EVIDENCE`. Submit a second claim with
+sources that do not address it, so its first verification cannot reach
+a verdict:
+
+1. `submit_claim("The Eiffel Tower is 330 metres tall.", "https://en.wikipedia.org/wiki/London_Eye,https://en.wikipedia.org/wiki/Big_Ben", "")` → `{claim_id: 2, status: "SUBMITTED"}`.
 2. `verify_claim(2)` → expect `{attestation_id: 2, claim_id: 2, verdict:
-   "REFUTED", status: "CURRENT"}`.
-3. `challenge_attestation(2, "https://en.wikipedia.org/wiki/London_Eye,https://en.wikipedia.org/wiki/Big_Ben", "")`
-   → expect `{attestation_id: 3, claim_id: 2, verdict:
-   "INSUFFICIENT_EVIDENCE", supersedes: 2, status: "CURRENT"}`.
+   "INSUFFICIENT_EVIDENCE", status: "CURRENT"}`. The model cannot quote
+   the off-topic pages for or against the height, so the per-source
+   quote rule records `INSUFFICIENT_EVIDENCE`. If it returns a
+   substantive verdict instead, the model misread the pages — retry
+   once, then pick different off-topic sources.
+3. `challenge_attestation(2, "https://en.wikipedia.org/wiki/Eiffel_Tower,https://www.britannica.com/place/Eiffel-Tower", "")`
+   → expect `{attestation_id: 3, claim_id: 2, verdict: "SUPPORTED",
+   supersedes: 2, status: "CURRENT"}`.
 4. `get_attestation(2)` → expect `status: "SUPERSEDED"` and
    `superseded_by: 3`. `get_attestation(3)` → expect `status:
    "CURRENT"` and `supersedes: 2`. `get_current_attestation(2)` →
    expect attestation 3. The old record is still readable — history is
    never deleted.
 
-If step 3 instead reverts with `[EXPECTED]` (same verdict), the model
-read the new sources as still refuting the claim; the old attestation
-standing is itself correct behavior. Retry the challenge with different
-irrelevant sources rather than forcing it.
+A `SUPPORTED`↔`REFUTED` flip on live pages is not demonstrated here: a
+truthful flip needs a claim whose evidence genuinely changed between
+source sets, and no stable real-page example was found. The flip path
+is covered by the direct tests instead
+(`test_challenge_supersedes_attestation` and
+`test_challenge_refuted_to_supported_flip` in
+`tests/direct/test_fact_check_attestation.py`).
 
 ### 6. `challenge_attestation` — same verdict rejection
 
