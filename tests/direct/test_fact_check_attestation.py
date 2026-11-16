@@ -456,6 +456,84 @@ def test_challenge_same_verdict_rejected(direct_vm, direct_deploy):
     assert contract.get_attestation(1)["status"] == "CURRENT"
 
 
+def test_challenge_insufficient_evidence_rejected(direct_vm, direct_deploy):
+    contract = direct_deploy("contracts/FactCheckAttestation.py")
+    _submit(direct_vm, contract)
+    _verify_supported(direct_vm, contract)
+
+    # The challenge's sources back the claim for one source only, so the
+    # per-source quote rule records INSUFFICIENT_EVIDENCE — and an
+    # INSUFFICIENT_EVIDENCE challenge must never supersede a SUPPORTED
+    # attestation (Steward review, 2026-11-16).
+    direct_vm.clear_mocks()
+    _mock_pages(direct_vm, {URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(direct_vm, ONE_QUOTE_ONLY)
+
+    with direct_vm.expect_revert("[EXPECTED]"):
+        contract.challenge_attestation(1, SOURCES_AB, "")
+
+    att = contract.get_attestation(1)
+    assert att["status"] == "CURRENT"
+    assert att["superseded_by"] == 0
+    assert contract.stats()["attestations"] == 1
+
+
+def test_challenge_upgrades_insufficient_attestation(direct_vm, direct_deploy):
+    contract = direct_deploy("contracts/FactCheckAttestation.py")
+    _submit(direct_vm, contract)
+
+    # First verification reaches INSUFFICIENT_EVIDENCE: only one source
+    # is quoted, so the per-source quote rule downgrades the verdict.
+    _mock_pages(direct_vm, {URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(direct_vm, ONE_QUOTE_ONLY)
+    result = contract.verify_claim(1)
+    assert result["verdict"] == "INSUFFICIENT_EVIDENCE"
+    assert contract.get_attestation(1)["status"] == "CURRENT"
+
+    # A challenge with both sources quoted reaches SUPPORTED, which
+    # replaces the INSUFFICIENT_EVIDENCE record.
+    direct_vm.clear_mocks()
+    _mock_pages(direct_vm, {URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(direct_vm, SUPPORTED)
+    result = contract.challenge_attestation(1, SOURCES_AB, "")
+
+    assert result["attestation_id"] == 2
+    assert result["verdict"] == "SUPPORTED"
+    assert result["supersedes"] == 1
+    assert result["status"] == "CURRENT"
+
+    old = contract.get_attestation(1)
+    assert old["status"] == "SUPERSEDED"
+    assert old["superseded_by"] == 2
+
+    assert contract.get_current_attestation(1)["attestation_id"] == 2
+
+
+def test_challenge_refuted_to_supported_flip(direct_vm, direct_deploy):
+    contract = direct_deploy("contracts/FactCheckAttestation.py")
+    _submit(direct_vm, contract, claim="Riverton's public library opened in 2025.", sources=SOURCES_CD)
+
+    _mock_pages(direct_vm, {URL_C: PAGE_C, URL_D: PAGE_D})
+    _mock_llm(direct_vm, REFUTED)
+    result = contract.verify_claim(1)
+    assert result["verdict"] == "REFUTED"
+
+    # The reverse flip: sources that support the claim replace the
+    # REFUTED record.
+    direct_vm.clear_mocks()
+    _mock_pages(direct_vm, {URL_A: PAGE_A, URL_B: PAGE_B})
+    _mock_llm(direct_vm, SUPPORTED)
+    result = contract.challenge_attestation(1, SOURCES_AB, "")
+
+    assert result["attestation_id"] == 2
+    assert result["verdict"] == "SUPPORTED"
+    assert result["supersedes"] == 1
+    assert result["status"] == "CURRENT"
+
+    assert contract.get_attestation(1)["status"] == "SUPERSEDED"
+    assert contract.get_current_attestation(1)["attestation_id"] == 2
+
+
 def test_challenge_superseded_attestation_rejected(direct_vm, direct_deploy):
     contract = direct_deploy("contracts/FactCheckAttestation.py")
     _submit(direct_vm, contract)
